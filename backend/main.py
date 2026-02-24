@@ -8,8 +8,7 @@ app = FastAPI(title="GapSight API")
 
 origins = [
     "http://localhost:5173",
-    "https://gapsight.vercel.app",        # replace with your actual Vercel URL
-    "https://gapsight-*.vercel.app",       # covers preview deployments too
+    "https://gap-sight.vercel.app",
 ]
 
 app.add_middleware(
