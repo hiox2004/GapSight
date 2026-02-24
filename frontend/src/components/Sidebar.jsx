@@ -15,7 +15,7 @@ export default function Sidebar() {
     <>
       {/* Mobile top bar */}
       <div className="md:hidden fixed top-0 left-0 right-0 z-50 bg-gray-900 border-b border-gray-800 flex items-center justify-between px-4 py-3">
-        <h1 className="text-lg font-bold text-white">  GapSight</h1>
+        <h1 className="text-lg font-bold text-white">GapSight</h1>
         <button onClick={() => setOpen(!open)} className="text-gray-400 hover:text-white">
           {open ? <X size={22} /> : <Menu size={22} />}
         </button>
@@ -44,7 +44,7 @@ export default function Sidebar() {
 
       {/* Desktop sidebar */}
       <aside className="hidden md:flex w-56 bg-gray-900 border-r border-gray-800 flex-col p-4 gap-2">
-        <h1 className="text-xl font-bold text-white mb-6 pl-5">   GapSight</h1>
+        <h1 className="text-xl font-bold text-white mb-6 pl-5">GapSight</h1>
         {links.map(({ to, icon, label }) => (
           <NavLink
             key={to}
