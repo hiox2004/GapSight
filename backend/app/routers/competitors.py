@@ -129,11 +129,9 @@ def get_gaps():
         my_engagement += p["likes"] + p["comments"] + p["shares"]
     
     my_engagement = round(my_engagement / len(my_posts.data), 1) if my_posts.data else 0
-
-    my_followers = client.table("follower_metrics") \
-        .select("follower_count").eq("user_id", user_id) \
-        .order("recorded_at", desc=True).limit(1).execute()
-    my_follower_count = my_followers.data[0]["follower_count"] if my_followers.data else 0
+    total_posts = len(my_posts.data)
+    distinct_content_types = max(len(my_content_counts), 1)
+    baseline_target_usage = max(3, round(total_posts / distinct_content_types) + 1)
 
     competitors = client.table("competitors").select("id, username") \
         .eq("owner_id", user_id).execute()
@@ -150,14 +148,22 @@ def get_gaps():
             comp_engagement = round(m["avg_likes"] + m["avg_comments"] + m["avg_shares"], 1)
             
             # Get user's usage of this content type
-            their_top_content = m["top_content_type"]
+            their_top_content = m["top_content_type"] or "N/A"
             your_usage_count = my_content_counts.get(their_top_content, 0)
+            usage_gap = max(0, baseline_target_usage - your_usage_count)
+            engagement_gap = max(0, round((comp_engagement - my_engagement) / 10))
+            combined_gap = max(usage_gap, engagement_gap)
             
             gaps.append({
                 "competitor": comp["username"],
                 "their_top_content": their_top_content,
                 "your_usage": your_usage_count,
-                "gap": max(0, 5 - your_usage_count)  # Gap is how many more posts you should make
+                "gap": combined_gap,
+                "why": (
+                    "Increase this format to close both usage and engagement differences"
+                    if combined_gap > 0
+                    else "You are already matching this content pattern"
+                )
             })
 
     return gaps

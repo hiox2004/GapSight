@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from app.database import supabase, retry_on_disconnect
 from collections import defaultdict
+from datetime import datetime, timedelta
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -129,3 +130,74 @@ def get_frequency_correlation():
         }
         for week, v in sorted(weekly.items())
     ]
+
+
+@router.get("/post-performance")
+@retry_on_disconnect()
+def get_post_performance():
+    """Return engagement per post over time for the main user.
+
+    This is used to plot how individual posts performed, without
+    changing any of the existing summary logic.
+    """
+    user = supabase.table("users").select("id").eq("username", "my_brand").execute()
+    if not user.data:
+        return []
+    user_id = user.data[0]["id"]
+
+    posts = supabase.table("posts").select(
+        "posted_at, likes, comments, shares, content_type"
+    ).eq("user_id", user_id).order("posted_at", desc=False).execute()
+
+    items = []
+    for p in posts.data:
+        total_engagement = p["likes"] + p["comments"] + p["shares"]
+        items.append(
+            {
+                "date": p["posted_at"][:10],
+                "engagement": total_engagement,
+                "content_type": p["content_type"],
+            }
+        )
+
+    return items
+
+
+@router.get("/trend-prediction")
+@retry_on_disconnect()
+def get_trend_prediction():
+    """Forecast follower trend for the next 4 weeks using linear regression."""
+    history = get_follower_growth()
+    if len(history) < 2:
+        return history
+
+    x_values = list(range(len(history)))
+    y_values = [point["followers"] for point in history]
+
+    mean_x = sum(x_values) / len(x_values)
+    mean_y = sum(y_values) / len(y_values)
+
+    numerator = sum((x - mean_x) * (y - mean_y) for x, y in zip(x_values, y_values))
+    denominator = sum((x - mean_x) ** 2 for x in x_values)
+    slope = (numerator / denominator) if denominator else 0
+    intercept = mean_y - (slope * mean_x)
+
+    points = [
+        {"date": point["date"], "followers": point["followers"], "type": "actual"}
+        for point in history
+    ]
+
+    last_date = datetime.fromisoformat(history[-1]["date"])
+    start_index = len(history)
+    for step in range(1, 5):
+        idx = start_index + step - 1
+        prediction = max(0, round(intercept + slope * idx))
+        points.append(
+            {
+                "date": (last_date + timedelta(days=7 * step)).strftime("%Y-%m-%d"),
+                "followers": prediction,
+                "type": "predicted",
+            }
+        )
+
+    return points

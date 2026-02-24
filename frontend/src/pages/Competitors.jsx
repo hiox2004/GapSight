@@ -2,22 +2,27 @@ import { useEffect, useState } from 'react'
 import api from '../api/axios'
 import CompetitorFollowersChart from '../components/CompetitorFollowersChart'
 import CompetitorEngagementChart from '../components/CompetitorEngagementChart'
+import CompetitorGrowthChart from '../components/CompetitorGrowthChart'
 
 export default function Competitors() {
+  const apiBase = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
   const [competitors, setCompetitors] = useState([])
   const [gaps, setGaps] = useState([])
+  const [growthSeries, setGrowthSeries] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
   useEffect(() => {
     const fetchAll = async () => {
       try {
-        const [compareRes, gapsRes] = await Promise.all([
+        const [compareRes, gapsRes, growthRes] = await Promise.all([
           api.get('/competitors/compare'),
           api.get('/competitors/gaps'),
+          api.get('/competitors/growth'),
         ])
         setCompetitors(compareRes.data)
         setGaps(gapsRes.data)
+        setGrowthSeries(growthRes.data)
       } catch (err) {
         setError('Failed to load competitor data.')
         console.error(err)
@@ -33,9 +38,10 @@ export default function Competitors() {
 
   const showCompetitors = Array.isArray(competitors) && competitors.length > 0
   const showGaps = Array.isArray(gaps) && gaps.length > 0
+  const showGrowth = Array.isArray(growthSeries) && growthSeries.length > 0
 
   return (
-    <div className="p-6 space-y-8">
+    <div id="competitors-root" className="p-6 space-y-8">
       <div>
         <h1 className="text-2xl font-bold text-white">Competitors</h1>
         <p className="text-gray-400 mt-1">See how you stack up</p>
@@ -64,6 +70,32 @@ export default function Competitors() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Growth Over Time */}
+      <div className="flex flex-wrap gap-2">
+        <a
+          href={`${apiBase}/reports/competitors.csv`}
+          className="inline-flex items-center px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-800 text-gray-100 hover:bg-gray-700 border border-gray-700"
+        >
+          Download competitors CSV
+        </a>
+        <a
+          href={`${apiBase}/reports/competitors.pdf`}
+          className="inline-flex items-center px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-800 text-gray-100 hover:bg-gray-700 border border-gray-700"
+        >
+          Download competitors PDF (charts)
+        </a>
+      </div>
+      <div className="bg-gray-900 rounded-2xl p-4">
+        <h2 className="text-lg font-semibold mb-3 text-white">Follower Growth Over Time</h2>
+        {showGrowth ? (
+          <CompetitorGrowthChart series={growthSeries} />
+        ) : (
+          <div className="flex items-center justify-center h-64 text-gray-400">
+            No follower history available yet
+          </div>
+        )}
       </div>
 
       {/* Gaps Table */}
