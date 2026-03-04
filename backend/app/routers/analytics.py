@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query, Body
 from app.database import supabase, retry_on_disconnect
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -8,13 +8,12 @@ router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 @router.get("/summary")
 @retry_on_disconnect()
-def get_summary():
-    user = supabase.table("users").select("id").eq("username", "my_brand").execute()
+def get_summary(username: str = Query(default="my_brand")):
+    user = supabase.table("users").select("id").eq("username", username).execute()
     if not user.data:
         return {}
     user_id = user.data[0]["id"]
 
-    # Latest follower count
     followers = supabase.table("follower_metrics") \
         .select("follower_count, recorded_at") \
         .eq("user_id", user_id) \
@@ -24,7 +23,6 @@ def get_summary():
         return {}
     total_followers = followers.data[0]["follower_count"]
 
-    # Follower count 30 days ago
     all_followers = supabase.table("follower_metrics") \
         .select("follower_count") \
         .eq("user_id", user_id) \
@@ -32,7 +30,6 @@ def get_summary():
     older_count = all_followers.data[0]["follower_count"] if all_followers.data else total_followers
     growth_pct = round(((total_followers - older_count) / older_count) * 100, 1) if older_count > 0 else 0
 
-    # Engagement rate + top content type
     posts = supabase.table("posts").select("*").eq("user_id", user_id).execute()
     post_data = posts.data
 
@@ -45,8 +42,6 @@ def get_summary():
         content_counts[p["content_type"]] += 1
     top_content = max(content_counts, key=content_counts.get) if content_counts else "N/A"
 
-    # Posts this week
-    from datetime import datetime, timedelta
     week_ago = (datetime.now() - timedelta(days=7)).isoformat()
     recent_posts = supabase.table("posts").select("id") \
         .eq("user_id", user_id) \
@@ -64,8 +59,8 @@ def get_summary():
 
 @router.get("/followers")
 @retry_on_disconnect()
-def get_follower_growth():
-    user = supabase.table("users").select("id").eq("username", "my_brand").execute()
+def get_follower_growth(username: str = Query(default="my_brand")):
+    user = supabase.table("users").select("id").eq("username", username).execute()
     if not user.data:
         return []
     user_id = user.data[0]["id"]
@@ -75,15 +70,14 @@ def get_follower_growth():
         .eq("user_id", user_id) \
         .order("recorded_at", desc=False).execute()
 
-    # Sample every 7th entry to get weekly data points
     data = result.data[::7] if result.data else []
     return [{"date": r["recorded_at"][:10], "followers": r["follower_count"]} for r in data]
 
 
 @router.get("/content-types")
 @retry_on_disconnect()
-def get_content_types():
-    user = supabase.table("users").select("id").eq("username", "my_brand").execute()
+def get_content_types(username: str = Query(default="my_brand")):
+    user = supabase.table("users").select("id").eq("username", username).execute()
     if not user.data:
         return []
     user_id = user.data[0]["id"]
@@ -109,8 +103,10 @@ def get_content_types():
 
 @router.get("/frequency-correlation")
 @retry_on_disconnect()
-def get_frequency_correlation():
-    user = supabase.table("users").select("id").eq("username", "my_brand").execute()
+def get_frequency_correlation(username: str = Query(default="my_brand")):
+    user = supabase.table("users").select("id").eq("username", username).execute()
+    if not user.data:
+        return []
     user_id = user.data[0]["id"]
 
     posts = supabase.table("posts").select("posted_at, likes, comments, shares") \
@@ -118,7 +114,7 @@ def get_frequency_correlation():
 
     weekly = defaultdict(lambda: {"posts": 0, "total_engagement": 0})
     for p in posts.data:
-        week = p["posted_at"][:7]  # "YYYY-MM" as grouping key
+        week = p["posted_at"][:7]
         weekly[week]["posts"] += 1
         weekly[week]["total_engagement"] += p["likes"] + p["comments"] + p["shares"]
 
@@ -134,13 +130,8 @@ def get_frequency_correlation():
 
 @router.get("/post-performance")
 @retry_on_disconnect()
-def get_post_performance():
-    """Return engagement per post over time for the main user.
-
-    This is used to plot how individual posts performed, without
-    changing any of the existing summary logic.
-    """
-    user = supabase.table("users").select("id").eq("username", "my_brand").execute()
+def get_post_performance(username: str = Query(default="my_brand")):
+    user = supabase.table("users").select("id").eq("username", username).execute()
     if not user.data:
         return []
     user_id = user.data[0]["id"]
@@ -165,9 +156,9 @@ def get_post_performance():
 
 @router.get("/trend-prediction")
 @retry_on_disconnect()
-def get_trend_prediction():
+def get_trend_prediction(username: str = Query(default="my_brand")):
     """Forecast follower trend for the next 4 weeks using linear regression."""
-    history = get_follower_growth()
+    history = get_follower_growth(username=username)
     if len(history) < 2:
         return history
 
@@ -201,3 +192,20 @@ def get_trend_prediction():
         )
 
     return points
+
+@router.get("/users")
+@retry_on_disconnect()
+def get_users():
+    result = supabase.table("users").select("id, username, platform").execute()
+    return result.data if result.data else []
+
+from fastapi import Body
+
+@router.post("/users")
+@retry_on_disconnect()
+def create_user(username: str = Body(...), platform: str = Body(default="instagram")):
+    existing = supabase.table("users").select("id").eq("username", username).execute()
+    if existing.data:
+        return {"error": "Username already exists"}
+    result = supabase.table("users").insert({"username": username, "platform": platform}).execute()
+    return result.data[0] if result.data else {"error": "Failed to create user"}

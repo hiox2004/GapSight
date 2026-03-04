@@ -10,8 +10,8 @@ import {
 
 export default function CompetitorFollowersChart({ data }) {
   const formatted = data.map(d => ({
-    name: d.username,
-    followers: d.follower_count,
+    name: d.name,
+    followers: d.followers,
   }))
 
   return (

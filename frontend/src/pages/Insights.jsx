@@ -1,22 +1,26 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import api from '../api/axios'
+import { useUser } from '../context/UserContext'
 import InsightsPanel from '../components/InsightsPanel'
 
 export default function Insights() {
+  const { username } = useUser()
   const [insights, setInsights] = useState(null)
   const [workflows, setWorkflows] = useState([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const apiBase = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 
-  const fetchInsights = async () => {
+  const fetchInsights = useCallback(async () => {
+    if (!username) return
     setLoading(true)
     setError(null)
 
     try {
+      const params = { username }
       const [res, workflowsRes] = await Promise.allSettled([
-        api.get('/insights/'),
-        api.get('/insights/workflows'),
+        api.get('/insights/', { params }),
+        api.get('/insights/workflows', { params }),
       ])
 
       if (res.status === 'fulfilled') {
@@ -37,12 +41,17 @@ export default function Insights() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [username])
 
   useEffect(() => {
     fetchInsights()
-  }, [])
+  }, [fetchInsights])
 
+  if (!username) return (
+    <div className="flex items-center justify-center h-screen text-gray-500">
+      Set your username on the Dashboard first.
+    </div>
+  )
   if (loading) return <div className="flex items-center justify-center h-screen text-white text-xl">Generating insights...</div>
   if (error) {
     return (
@@ -70,7 +79,7 @@ export default function Insights() {
       </div>
       <div className="flex flex-wrap gap-2">
         <a
-          href={`${apiBase}/reports/dashboard.pdf`}
+          href={`${apiBase}/reports/dashboard.pdf?username=${username}`}
           className="inline-flex items-center px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-800 text-gray-100 hover:bg-gray-700 border border-gray-700"
         >
           Download dashboard PDF (charts)

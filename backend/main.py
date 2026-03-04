@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import analytics, competitors, insights, reports
+from app.routers import analytics, competitors, insights, reports, sync
 
 
 app = FastAPI(title="GapSight API")
@@ -28,3 +28,4 @@ app.include_router(analytics.router)
 app.include_router(competitors.router)
 app.include_router(insights.router)
 app.include_router(reports.router)
+app.include_router(sync.router)

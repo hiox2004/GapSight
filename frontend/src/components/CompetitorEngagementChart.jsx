@@ -10,7 +10,7 @@ import {
 
 export default function CompetitorEngagementChart({ data }) {
   const formatted = data.map(d => ({
-    name: d.username,
+    name: d.name,
     engagement: d.avg_engagement,
   }))
 

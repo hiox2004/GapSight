@@ -1,314 +1,213 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from app.database import get_supabase_client, retry_on_disconnect
 from app.routers.competitors import get_gaps
-from collections import defaultdict
 import os
-from groq import Groq
-from dotenv import load_dotenv
 import json
+import logging
 
-load_dotenv()
-
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/insights", tags=["insights"])
-_groq_client = None
 
-
-def _get_groq_client():
-    global _groq_client
-    if _groq_client is not None:
-        return _groq_client
-
+groq_client = None
+try:
+    from groq import Groq
     api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        return None
-
-    try:
-        _groq_client = Groq(api_key=api_key)
-    except Exception:
-        _groq_client = None
-    return _groq_client
+    if api_key:
+        groq_client = Groq(api_key=api_key)
+except Exception as e:
+    logger.warning(f"Groq client not initialized: {e}")
 
 
-def _default_insights(summary, gaps):
-    my_engagement = summary.get("my_engagement_rate", 0)
-    comp_engagement = summary.get("avg_competitor_engagement", 0)
-    my_posts_per_week = summary.get("my_posts_per_week", 0)
+def build_summary(username: str = "my_brand"):
+    supabase = get_supabase_client()
+    user = supabase.table("users").select("id").eq("username", username).execute()
+    if not user.data:
+        return {}
+    user_id = user.data[0]["id"]
 
-    top_gap = gaps[0] if gaps else None
-    top_types = [t for t in summary.get("competitor_top_contents", []) if t]
-    top_types_text = ", ".join(top_types[:3]) if top_types else "mixed formats"
+    followers = supabase.table("follower_metrics") \
+        .select("follower_count") \
+        .eq("user_id", user_id) \
+        .order("recorded_at", desc=True) \
+        .limit(1).execute()
+    my_followers = followers.data[0]["follower_count"] if followers.data else 0
 
-    if comp_engagement > my_engagement:
-        better_line = (
-            f"Competitors are averaging higher engagement ({comp_engagement}) than your current rate ({my_engagement}%). "
-            f"They also show stronger consistency around {top_types_text}."
-        )
-    else:
-        better_line = (
-            "Your engagement is at or above competitor averages, but consistency and repeatable content systems still matter. "
-            f"Top competitor formats currently include {top_types_text}."
-        )
+    posts = supabase.table("posts").select("likes, comments, shares, content_type").eq("user_id", user_id).execute()
+    post_data = posts.data or []
+    total_eng = sum(p["likes"] + p["comments"] + p["shares"] for p in post_data)
+    avg_eng = round(total_eng / len(post_data), 1) if post_data else 0
+    engagement_rate = round((avg_eng / my_followers) * 100, 2) if my_followers else 0
 
-    if top_gap and top_gap.get("gap", 0) > 0:
-        content_gaps = (
-            f"The largest gap is in {top_gap.get('their_top_content', 'high-performing')} content. "
-            f"You currently post it {top_gap.get('your_usage', 0)} times, and adding about {top_gap.get('gap', 0)} more posts can close the gap faster."
-        )
-    else:
-        content_gaps = (
-            "No severe format gap is detected right now. Focus on quality improvements and testing post hooks, captions, and CTAs."
-        )
+    from collections import defaultdict
+    counts = defaultdict(int)
+    for p in post_data:
+        counts[p["content_type"]] += 1
+    top_content = max(counts, key=counts.get) if counts else "N/A"
 
-    if my_posts_per_week < 4:
-        best_time_to_post = "Post at a fixed peak window 4 times/week and review 24-hour engagement before repeating the slot."
-    else:
-        best_time_to_post = "Keep your current posting cadence and prioritize the two highest-performing time windows each week."
+    from datetime import datetime, timedelta
+    week_ago = (datetime.now() - timedelta(days=7)).isoformat()
+    recent = supabase.table("posts").select("id").eq("user_id", user_id).gte("posted_at", week_ago).execute()
+    posts_per_week = len(recent.data) if recent.data else 0
+
+    competitors = supabase.table("competitors").select("username").eq("owner_id", user_id).execute()
+    comp_followers_list = []
+    comp_eng_list = []
+
+    for c in (competitors.data or []):
+        cname = c["username"]
+        cid_res = supabase.table("users").select("id").eq("username", cname).execute()
+        if not cid_res.data:
+            continue
+        cid = cid_res.data[0]["id"]
+
+        c_followers = supabase.table("follower_metrics") \
+            .select("follower_count") \
+            .eq("user_id", cid) \
+            .order("recorded_at", desc=True) \
+            .limit(1).execute()
+        if c_followers.data:
+            comp_followers_list.append(c_followers.data[0]["follower_count"])
+
+        c_posts = supabase.table("posts").select("likes, comments, shares").eq("user_id", cid).execute()
+        if c_posts.data:
+            total = sum(p["likes"] + p["comments"] + p["shares"] for p in c_posts.data)
+            comp_eng_list.append(round(total / len(c_posts.data), 1))
+
+    avg_comp_followers = round(sum(comp_followers_list) / len(comp_followers_list), 1) if comp_followers_list else 0
+    avg_comp_eng = round(sum(comp_eng_list) / len(comp_eng_list), 1) if comp_eng_list else 0
 
     return {
-        "what_competitors_do_better": better_line,
-        "content_gaps": content_gaps,
-        "best_time_to_post": best_time_to_post,
-        "recommendations": [
-            "Publish consistently each week and avoid long posting gaps.",
-            "Increase output in the top competitor content formats.",
-            "Review performance weekly and double down on top-performing formats.",
-        ],
+        "username": username,
+        "my_followers": my_followers,
+        "my_engagement_rate": engagement_rate,
+        "my_avg_engagement": avg_eng,
+        "my_top_content": top_content,
+        "my_posts_per_week": posts_per_week,
+        "avg_competitor_followers": avg_comp_followers,
+        "avg_competitor_engagement": avg_comp_eng,
     }
 
 
-def _normalize_insights(payload, fallback):
-    if not isinstance(payload, dict):
-        return fallback
+def _default_insights(summary: dict, gaps: list) -> dict:
+    recs = []
+    if summary.get("avg_competitor_engagement", 0) > summary.get("my_avg_engagement", 0):
+        recs.append("Competitors have higher engagement — focus on more interactive content formats.")
+    if gaps:
+        top_gap = max(gaps, key=lambda g: g.get("gap_score", 0))
+        recs.append(f"Biggest content gap is {top_gap['top_content_type']} — consider posting more of it.")
+    if summary.get("my_posts_per_week", 0) < 3:
+        recs.append("Posting frequency is low — aim for at least 3–5 posts per week.")
+    while len(recs) < 3:
+        recs.append("Keep monitoring competitor activity and adjust your content mix regularly.")
 
-    normalized = {
-        "what_competitors_do_better": str(payload.get("what_competitors_do_better") or fallback["what_competitors_do_better"]),
-        "content_gaps": str(payload.get("content_gaps") or fallback["content_gaps"]),
-        "best_time_to_post": str(payload.get("best_time_to_post") or fallback["best_time_to_post"]),
-        "recommendations": payload.get("recommendations") if isinstance(payload.get("recommendations"), list) else fallback["recommendations"],
+    return {
+        "what_competitors_do_better": f"Competitors average {summary.get('avg_competitor_engagement', 0)} engagements vs your {summary.get('my_avg_engagement', 0)}.",
+        "content_gaps": gaps[0]["recommendation"] if gaps else "No significant content gaps detected.",
+        "best_time_to_post": "Insufficient data to determine best posting time.",
+        "recommendations": recs[:3],
     }
 
-    cleaned_recs = [str(item).strip() for item in normalized["recommendations"] if str(item).strip()]
-    if len(cleaned_recs) < 3:
-        cleaned_recs = fallback["recommendations"]
-    normalized["recommendations"] = cleaned_recs[:3]
 
-    return normalized
-
-
-def build_summary():
-    @retry_on_disconnect()
-    def _build():
-        client = get_supabase_client()
-        user = client.table("users").select("id").eq("username", "my_brand").execute()
-        if not user.data:
-            return {
-                "my_followers": 0,
-                "my_engagement_rate": 0,
-                "my_top_content": "N/A",
-                "my_posts_per_week": 0,
-                "avg_competitor_followers": 0,
-                "avg_competitor_engagement": 0,
-                "competitor_top_contents": [],
-            }
-        user_id = user.data[0]["id"]
-
-        # My latest followers
-        my_followers = client.table("follower_metrics") \
-            .select("follower_count").eq("user_id", user_id) \
-            .order("recorded_at", desc=True).limit(1).execute()
-        my_follower_count = my_followers.data[0].get("follower_count", 0) if my_followers.data else 0
-
-        # My engagement + top content
-        my_posts = client.table("posts") \
-            .select("likes, comments, shares, content_type") \
-            .eq("user_id", user_id).execute()
-
-        content_counts = defaultdict(int)
-        total_engagement = 0
-        for p in my_posts.data:
-            likes = p.get("likes") or 0
-            comments = p.get("comments") or 0
-            shares = p.get("shares") or 0
-            content_type = p.get("content_type") or "Unknown"
-            total_engagement += likes + comments + shares
-            content_counts[content_type] += 1
-
-        avg_engagement = round(total_engagement / len(my_posts.data), 1) if my_posts.data else 0
-        engagement_rate = round((avg_engagement / my_follower_count) * 100, 2) if my_follower_count else 0
-        top_content = max(content_counts, key=content_counts.get) if content_counts else "N/A"
-        posts_per_week = round(len(my_posts.data) / 13, 1)
-
-        # Competitor averages
-        competitors = client.table("competitors").select("id, username") \
-            .eq("owner_id", user_id).execute()
-
-        comp_data = []
-        for comp in competitors.data:
-            metrics = client.table("competitor_metrics") \
-                .select("follower_count, avg_likes, avg_comments, avg_shares, top_content_type") \
-                .eq("competitor_id", comp["id"]) \
-                .order("recorded_at", desc=True).limit(1).execute()
-            if metrics.data:
-                m = metrics.data[0]
-                follower_count = m.get("follower_count") or 0
-                avg_likes = m.get("avg_likes") or 0
-                avg_comments = m.get("avg_comments") or 0
-                avg_shares = m.get("avg_shares") or 0
-                comp_data.append({
-                    "name": comp["username"],
-                    "followers": follower_count,
-                    "avg_engagement": avg_likes + avg_comments + avg_shares,
-                    "top_content": m.get("top_content_type") or "Unknown"
-                })
-
-        avg_comp_followers = round(sum(c["followers"] for c in comp_data) / len(comp_data)) if comp_data else 0
-        avg_comp_engagement = round(sum(c["avg_engagement"] for c in comp_data) / len(comp_data), 1) if comp_data else 0
-        comp_top_contents = [c["top_content"] for c in comp_data]
-
-        return {
-            "my_followers": my_follower_count,
-            "my_engagement_rate": engagement_rate,
-            "my_top_content": top_content,
-            "my_posts_per_week": posts_per_week,
-            "avg_competitor_followers": avg_comp_followers,
-            "avg_competitor_engagement": avg_comp_engagement,
-            "competitor_top_contents": comp_top_contents
-        }
-    
-    return _build()
+def _normalize_insights(raw: dict, fallback: dict) -> dict:
+    required = ["what_competitors_do_better", "content_gaps", "best_time_to_post", "recommendations"]
+    result = {}
+    for key in required:
+        val = raw.get(key, fallback.get(key, ""))
+        if key == "recommendations":
+            if not isinstance(val, list) or len(val) < 1:
+                val = fallback.get("recommendations", [])
+            val = [str(r) for r in val[:3]]
+            while len(val) < 3:
+                val.append(fallback["recommendations"][0] if fallback.get("recommendations") else "Monitor and adjust your strategy.")
+        else:
+            val = str(val).strip() or str(fallback.get(key, ""))
+        result[key] = val
+    return result
 
 
 @router.get("/")
-@retry_on_disconnect()
-def get_insights():
-    summary = build_summary()
-    try:
-        gaps = get_gaps()
-    except Exception:
-        gaps = []
+def get_insights(username: str = Query(default="my_brand")):
+    summary = build_summary(username=username)
+    gaps = get_gaps(username=username)
+    fallback = _default_insights(summary, gaps)
 
-    baseline = _default_insights(summary, gaps)
-
-    prompt = f"""
-You are a senior growth analyst creating high-precision social media insights.
-
-Your objective:
-Produce insights that are strictly evidence-based from the provided dataset and useful for immediate weekly execution.
-
-DATA (single source of truth):
-{{
-    "my_stats": {{
-        "followers": {summary["my_followers"]},
-        "engagement_rate_pct": {summary["my_engagement_rate"]},
-        "top_content_type": {json.dumps(summary["my_top_content"])},
-        "posts_per_week": {summary["my_posts_per_week"]}
-    }},
-    "competitor_averages": {{
-        "avg_followers": {summary["avg_competitor_followers"]},
-        "avg_engagement": {summary["avg_competitor_engagement"]},
-        "top_content_types": {json.dumps(summary["competitor_top_contents"])}
-    }},
-    "top_content_gaps": {json.dumps(gaps[:3])}
-}}
-
-Reasoning requirements:
-1) Compare my engagement_rate_pct to competitor avg_engagement and explicitly quantify the difference.
-2) Explain what competitors do better using only provided values (cadence, content mix, engagement).
-3) For content gaps, prioritize only the highest-impact gaps from top_content_gaps.
-4) If any metric is missing/zero/insufficient, say "insufficient data" for that specific claim instead of guessing.
-
-Writing requirements:
-- Be specific and concrete; avoid generic advice.
-- Keep each sentence tightly tied to numbers or named fields in DATA.
-- Do not use external benchmarks, assumptions, or invented timing windows.
-- best_time_to_post must be framed as a data-limitation-aware recommendation (e.g., suggest an experiment plan if timing data is absent).
-
-Output format:
-Return valid JSON only with exactly these keys:
-{{
-    "what_competitors_do_better": "2-3 precise sentences",
-    "content_gaps": "2-3 precise sentences",
-    "best_time_to_post": "1-2 specific sentences",
-    "recommendations": [
-        "short action 1",
-        "short action 2",
-        "short action 3"
-    ]
-}}
-
-Final quality check before answering:
-- Every claim must map to an explicit value in DATA.
-- No fluff, no repetition, no invented facts.
-- recommendations must be exactly 3 and each must be directly executable this week.
-"""
-
-    groq_client = _get_groq_client()
     if not groq_client:
-        baseline["source"] = "rules"
-        return baseline
+        return {**fallback, "source": "rules"}
 
     try:
+        prompt = f"""
+You are a social media analytics assistant. Based ONLY on the data below, return a JSON object.
+
+DATA:
+{json.dumps(summary, indent=2)}
+
+GAPS:
+{json.dumps(gaps, indent=2)}
+
+RULES:
+- Every claim must map directly to a value in DATA or GAPS.
+- If data is missing, say "insufficient data" — do not guess.
+- Do not use external benchmarks.
+- Return ONLY valid JSON with exactly these keys:
+  - "what_competitors_do_better": string
+  - "content_gaps": string
+  - "best_time_to_post": string
+  - "recommendations": array of exactly 3 short strings
+"""
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.2,
+            temperature=0.3,
         )
-        llm_payload = json.loads(response.choices[0].message.content)
-        merged = _normalize_insights(llm_payload, baseline)
-        merged["source"] = "ai+rules"
-        return merged
-    except Exception:
-        baseline["source"] = "rules"
-        return baseline
+        content = response.choices[0].message.content or ""
+        # Strip markdown code fences if present (```json ... ``` or ``` ... ```)
+        content = content.strip()
+        if content.startswith("```"):
+            content = content.split("```", 2)[1]
+            if content.startswith("json"):
+                content = content[4:]
+            content = content.rsplit("```", 1)[0].strip()
+        raw = json.loads(content)
+        normalized = _normalize_insights(raw, fallback)
+        return {**normalized, "source": "ai+rules"}
+    except Exception as e:
+        logger.error(f"Groq call failed: {e}")
+        return {**fallback, "source": "rules"}
 
 
 @router.get("/workflows")
-@retry_on_disconnect()
-def get_workflows():
-    """Return simple automation-style weekly action workflows."""
-    try:
-        summary = build_summary()
-        gaps = get_gaps()
-    except Exception:
-        return [{
-            "name": "Weekly strategy review",
-            "trigger": "Every Monday morning (before planning posts)",
-            "action": "Review previous week performance and schedule next week content in advance.",
-        }]
+def get_workflows(username: str = Query(default="my_brand")):
+    summary = build_summary(username=username)
+    gaps = get_gaps(username=username)
 
     workflows = []
 
-    if summary.get("my_posts_per_week", 0) < 4:
+    if summary.get("my_posts_per_week", 0) < 3:
         workflows.append({
-            "name": "Posting cadence booster",
-            "trigger": "At the start of each week (your first planning block)",
-            "action": "Queue at least 4 posts in your content calendar and schedule them across the week.",
+            "name": "Boost Posting Cadence",
+            "trigger": f"Fewer than 3 posts per week detected for {username}.",
+            "action": "Schedule at least 3–5 posts per week across your top content types."
         })
 
-    if summary.get("my_engagement_rate", 0) < 3:
+    if summary.get("my_engagement_rate", 0) < 2.0:
         workflows.append({
-            "name": "Engagement lift sprint",
-            "trigger": "Within 60 minutes after each post goes live",
-            "action": "Run a 60-minute response window for comments and shares to increase early engagement.",
+            "name": "Engagement Sprint",
+            "trigger": f"Engagement rate below 2% for {username}.",
+            "action": "Run a 60-minute engagement sprint after each post — reply to every comment within the first hour."
         })
 
-    top_gaps = [gap for gap in gaps if gap.get("gap", 0) > 0][:2]
-    for gap in top_gaps:
+    for gap in gaps[:2]:
         workflows.append({
-            "name": f"Close {gap.get('their_top_content', 'content')} gap",
-            "trigger": "During your weekly content planning session",
-            "action": (
-                f"Add {gap.get('gap', 0)} more {gap.get('their_top_content', 'content')} posts "
-                f"to compete with {gap.get('competitor', 'top competitor')}."
-            ),
+            "name": f"Close {gap['top_content_type']} Gap",
+            "trigger": f"Gap score of {gap['gap_score']} detected vs {gap['competitor']}.",
+            "action": gap["recommendation"]
         })
 
     if not workflows:
         workflows.append({
-            "name": "Maintain winning rhythm",
-            "trigger": "Once per week (same day each week)",
-            "action": "Keep your current posting strategy and review competitor changes every Monday.",
+            "name": "Maintain Winning Rhythm",
+            "trigger": "All metrics are on track.",
+            "action": "Keep your current posting schedule and monitor competitor activity weekly."
         })
 
     return workflows

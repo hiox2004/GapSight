@@ -3,21 +3,24 @@ import Sidebar from './components/Sidebar'
 import Dashboard from './pages/Dashboard'
 import Competitors from './pages/Competitors'
 import Insights from './pages/Insights'
+import { UserProvider } from './context/UserContext'
 
 function App() {
   return (
-    <BrowserRouter>
-      <div className="flex h-screen bg-gray-950 text-white">
-        <Sidebar />
-        <main className="flex-1 overflow-y-auto pt-16 md:pt-0">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/competitors" element={<Competitors />} />
-            <Route path="/insights" element={<Insights />} />
-          </Routes>
-        </main>
-      </div>
-    </BrowserRouter>
+    <UserProvider>
+      <BrowserRouter>
+        <div className="flex h-screen bg-gray-950 text-white">
+          <Sidebar />
+          <main className="flex-1 overflow-y-auto pt-16 md:pt-0">
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/competitors" element={<Competitors />} />
+              <Route path="/insights" element={<Insights />} />
+            </Routes>
+          </main>
+        </div>
+      </BrowserRouter>
+    </UserProvider>
   )
 }
 export default App
